@@ -70,7 +70,16 @@
 			<artifactId>com.io7m.flannel.core</artifactId>
 			<version>1.0.0</version>
 		</dependency>
+		<!-- AAF -->		
+		<dependency>
+		    <groupId>org.apache.poi</groupId>
+    		<artifactId>poi</artifactId>
+    		<version>5.2.5</version>
+		</dependency>
 	</dependencies>
+
+
+
 
 	<build>
 

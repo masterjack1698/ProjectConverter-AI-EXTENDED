@@ -1,277 +1,250 @@
+// Written by Jürgen Moßgraber - mossgrabers.de
+// (c) 2021-2026
+// Licensed under LGPLv3 - http://www.gnu.org/licenses/lgpl-3.0.txt
+
 package de.mossgrabers.projectconverter.format.aaf;
 
-import org.apache.poi.ssff.SSFF4File;
-import org.apache.poi.ssff.ssef.*;
 import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.HashMap;
 
-public class AAFParser {
+import org.apache.poi.poifs.filesystem.DirectoryEntry;
+import org.apache.poi.poifs.filesystem.DocumentEntry;
+import org.apache.poi.poifs.filesystem.DocumentInputStream;
+import org.apache.poi.poifs.filesystem.Entry;
+import org.apache.poi.poifs.filesystem.POIFSFileSystem;
+
+
+/**
+ * Reads an AAF file (Advanced Authoring Format).
+ *
+ * An AAF file is an OLE2 Compound File (Microsoft Structured Storage). Apache POI provides
+ * access to the storage structure (streams and storages) but not to the AAF object model
+ * (Mobs, SourceClips, Sequences, PCMDescriptors, ...). Decoding that object model requires
+ * either the official AAF SDK or a substantial hand-written binary parser (TODO).
+ *
+ * As a first pragmatic step this parser extracts all embedded audio essence (WAV/PCM data
+ * stored in the OLE2 streams) which covers the primary goal: audio tracks and their clips.
+ *
+ * @author Jürgen Moßgraber
+ */
+public class AAFParser
+{
+    /**
+     * An audio clip extracted from an AAF file.
+     */
+    public static class AudioClip
+    {
+        /** The extracted audio file (temporary WAV file). */
+        public final File   audioFile;
+        /** The name of the OLE2 stream the audio was extracted from. */
+        public final String streamName;
+        /** Duration of the audio in seconds. */
+        public final double durationSeconds;
+
+
+        /**
+         * Constructor.
+         *
+         * @param audioFile       The extracted audio file
+         * @param streamName      The name of the stream it was extracted from
+         * @param durationSeconds The duration in seconds
+         */
+        AudioClip (final File audioFile, final String streamName, final double durationSeconds)
+        {
+            this.audioFile = audioFile;
+            this.streamName = streamName;
+            this.durationSeconds = durationSeconds;
+        }
+    }
+
 
     /**
-     * Parses a top-level composition from an .AAF file.
-     * Returns a list of AudioClip objects representing the audio tracks/clips found in the AAF.
+     * The result of parsing an AAF file.
      */
-    public static List<AudioClip> parse(File aafFile) throws Exception {
-        if (!aafFile.exists()) throw new Exception("File " + aafFile.getPath() + " not found.");
-
-        SSFF4File file = new SSFF4File(aafFile);
-        SSFF4Input input = file.createSSFF4Document();
-        SSFF4DataReader reader = input.getReader();
-
-        List<AudioClip> clips = new ArrayList<>();
-
-        // Read all objects in the document
-        while (!reader.isEndOfDocument()) {
-            SSGObject obj = reader.readNextSSGObject(reader);
-
-            if (obj instanceof SSFF4Composition) {
-                SSFF4Composition comp = (SSFF4Composition) obj;
-                
-                // Check if this is a top-level composition
-                if (!isRoot(comp)) {
-                    continue;
-                }
-
-                AAFComposition compObj = new AAFComposition(comp, reader, input);
-                clips.addAll(compObj.getTopLevelClips());
-            } else if (obj instanceof SSFF4Clip) {
-                // Handle sub-clips / nested compositions
-                SSFF4Clip clip = (SSFF4Clip) obj;
-                if (!isRoot(clip)) continue;
-
-                AAFClip clipObj = new AAFClip(clip, reader, input);
-                clips.add(clipObj);
-            } else {
-                reader.skipNextSSGObject();
-            }
-        }
-
-        return clips;
+    public static class AafProject
+    {
+        /** The extracted audio clips. */
+        public final List<AudioClip> audioClips = new ArrayList<> ();
+        /** The names of all streams found in the OLE2 storage (for diagnostics). */
+        public final List<String>    streamNames = new ArrayList<> ();
     }
 
-    private static boolean isRoot(SSFF4Composition comp) throws Exception {
-        SSFF4Reference parent = comp.getProperty(SSFF4Property.PARENT_COMPOSITION, null);
-        if (parent == null) return true; // No parent means root
-        String val = parent.getValue();
-        return val.equals("root") || val.isEmpty();
-    }
 
     /**
-     * Parses a single clip from an AAF file.
+     * Parses an AAF file and extracts all embedded audio essence.
+     *
+     * @param aafFile      The AAF file to read
+     * @param outputFolder The folder where to write the extracted audio files
+     * @return The parsed project
+     * @throws IOException Could not read the file
      */
-    public static AudioClip parseClip(File aafFile, long offset) throws Exception {
-        SSFF4File file = new SSFF4File(aafFile);
-        SSFF4Input input = file.createSSFF4Document();
-        SSFF4DataReader reader = input.getReader();
+    public static AafProject parse (final File aafFile, final File outputFolder) throws IOException
+    {
+        final AafProject project = new AafProject ();
 
-        // Seek to the specified offset (clip position)
-        reader.seekToOffset(offset);
-
-        SSGObject obj = reader.readNextSSGObject(reader);
-        if (!(obj instanceof SSFF4Clip)) {
-            throw new Exception("Expected Clip object at offset " + offset);
+        try (POIFSFileSystem fileSystem = new POIFSFileSystem (aafFile, true))
+        {
+            scanStorage (fileSystem.getRoot (), "", project, outputFolder);
         }
 
-        SSFF4Clip clip = (SSFF4Clip) obj;
-        return new AAFClip(clip, reader, input);
+        return project;
     }
 
-    // ---------------------------------------------------------------------------
-    // Nested classes for parsing
-    // ---------------------------------------------------------------------------
 
-    private static class AAFComposition extends SSFF4Object implements SSFF4Composition {
-        public final SSFF4Reference PARENT_COMPOSITION;
-        public final List<AAFClip> topLevelClips = new ArrayList<>();
+    /**
+     * Recursively scans an OLE2 storage for embedded audio (RIFF/WAVE) streams.
+     *
+     * @param directory     The storage to scan
+     * @param path          The current path (for diagnostics)
+     * @param project       Where to collect the results
+     * @param outputFolder  Where to write the extracted audio files
+     * @throws IOException Could not read a stream
+     */
+    private static void scanStorage (final DirectoryEntry directory, final String path, final AafProject project, final File outputFolder) throws IOException
+    {
+        for (final Entry entry: directory)
+        {
+            final String entryPath = path.isEmpty () ? entry.getName () : path + "/" + entry.getName ();
 
-        AAFComposition(SSFF4DataReader reader, SSFF4Input input) throws Exception {
-            super(reader); // Position 0 is the clip itself (composition ID)
-            
-            PARENT_COMPOSITION = getProperty(SSFF4Property.PARENT_COMPOSITION, null);
-            AUDIO_SOURCE = getProperty(SSFF4Property.AUDIO_SOURCE, null);
-
-            // Read all children of this composition
-            while (!reader.isEndOfDocument()) {
-                SSGObject child = reader.readNextSSGObject(reader);
-
-                if (child instanceof SSFF4Clip) {
-                    SSFF4Clip clipChild = (SSFF4Clip) child;
-                    if (!isRoot(clipChild)) { // Skip sub-compositions, only want top-level clips
-                        AAFClip clipObj = new AAFClip(clipChild, reader, input);
-                        topLevelClips.add(clipObj);
-                    }
-                } else if (child instanceof SSFF4Composition) {
-                    SSFF4Composition compChild = (SSFF4Composition) child;
-                    // Recursively process nested compositions
-                    AAFComposition subComp = new AAFComposition(compChild, reader, input);
-                    topLevelClips.addAll(subComp.getTopLevelClips());
-                } else if (!(child instanceof SSGArray)) {
-                    reader.skipNextSSGObject();
-                }
-            }
-        }
-
-        private static boolean isRoot(SSFF4Clip clip) throws Exception {
-            SSFF4Reference parent = clip.getProperty(SSFF4Property.PARENT_COMPOSITION, null);
-            if (parent == null) return true;
-            String val = parent.getValue();
-            return val.equals("root") || val.isEmpty();
-        }
-
-        private static boolean isRoot(SSFF4Composition comp) throws Exception {
-            SSFF4Reference parent = comp.getProperty(SSFF4Property.PARENT_COMPOSITION, null);
-            if (parent == null) return true;
-            String val = parent.getValue();
-            return val.equals("root") || val.isEmpty();
-        }
-
-        public List<AAFClip> getTopLevelClips() { return topLevelClips; }
-    }
-
-    private static class AAFClip extends SSFF4Object implements SSFF4Composition {
-        public final SSFF4Reference PARENT_COMPOSITION;
-        public final SSFF4Reference AUDIO_SOURCE;
-        public final SSFF4Reference EDIT_RATE;
-        public final long startTime;
-        public final long endTime;
-        public final String name;
-
-        AAFClip(SSFF4DataReader reader, SSFF4Input input) throws Exception {
-            super(reader);
-
-            PARENT_COMPOSITION = getProperty(SSFF4Property.PARENT_COMPOSITION, null);
-            AUDIO_SOURCE = getProperty(SSFF4Property.AUDIO_SOURCE, null);
-            EDIT_RATE = getProperty(SSFF4Property.EDIT_RATE, null);
-
-            // Duration (in AAF units - 1/29.97 seconds each)
-            SSFF4Reference durationRef = getProperty(SSFF4Property.DURATION, null);
-            if (durationRef != null && !durationRef.getValue().isEmpty()) {
-                long dur = Long.parseLong(durationRef.getValue());
-                startTime = reader.getOffset() + getOffset(); // clip start position
-                endTime = startTime + dur;
-            } else {
-                // Fallback: read from the source file info if available
-                SSFF4Reference srcRef = getProperty(SSFF4Property.SOURCE_FILE, null);
-                if (srcRef != null) {
-                    File sourceFile = new File(srcRef.getValue());
-                    this.startTime = 0;
-                    this.endTime = getFileLength(sourceFile); // approximate duration
-                } else {
-                    startTime = 0;
-                    endTime = 1000L * 60; // default: 1 minute in AAF units
-                }
+            if (entry instanceof final DirectoryEntry subDirectory)
+            {
+                scanStorage (subDirectory, entryPath, project, outputFolder);
+                continue;
             }
 
-            // Name from object ID or properties
-            this.name = getProperty(SSFF4Property.NAME, null) != null 
-                       ? getProperty(SSFF4Property.NAME).getValue()
-                       : "Clip-" + (System.currentTimeMillis() / 1000);
-        }
+            if (entry instanceof final DocumentEntry document)
+            {
+                project.streamNames.add (entryPath);
 
-        @Override public SSFF4Reference getParentComposition() { return PARENT_COMPOSITION; }
-        @Override public SSFF4Reference getAudioSource() { return AUDIO_SOURCE; }
-        @Override public SSFF4Reference getEditRate() { return EDIT_RATE; }
-
-        private long getFileLength(File file) throws Exception {
-            if (file.exists()) {
-                // Try to read the audio source info from the AAF
-                SSFF4File aaf = new SSFF4File(file);
-                SSFF4Input input = aaf.createSSFF4Document();
-                SSFF4DataReader reader = input.getReader();
-
-                while (!reader.isEndOfDocument()) {
-                    SSGObject obj = reader.readNextSSGObject(reader);
-                    if (obj instanceof SSFF4FileSource fs) {
-                        return fs.getSize(); // duration in AAF units
-                    }
-                }
+                // TODO: Full AAF object model decoding (dictionary, Mobs, SourceClips,
+                // PCMDescriptors, timelines) is not implemented yet. For now extract
+                // all streams which contain RIFF/WAVE data (embedded audio essence).
+                final File extractedFile = extractIfWaveFile (document, outputFolder);
+                if (extractedFile != null)
+                    project.audioClips.add (new AudioClip (extractedFile, entryPath, getWaveDuration (extractedFile)));
             }
-            return 1000L * 60; // default: 1 minute
-        }
-
-        private SSFF4Property getProperty(SSFF4Property prop, Throwable error) throws Exception {
-            try {
-                SSFGObject child = getNestedProperty(prop);
-                if (child != null && !(child instanceof SSGArray)) {
-                    SSFF4Property pprop = ((SSFF4Composition) this).getProperty(prop);
-                    if (pprop != null && !pprop.getValue().isEmpty()) return pprop;
-                } else if (child == null) {
-                    throw error;
-                } else if (error == null) return null;
-            } catch (Exception e) {
-                // Skip unknown property types and try next
-            }
-
-            throw error;
-        }
-
-        private SSFGObject getNestedProperty(SSFF4Property prop) throws Exception {
-            SSFGObject childObj = getProperty(prop);
-            
-            while (childObj instanceof SSGArray arr && !(childObj instanceof SSFF4Reference)) {
-                // Find the first non-empty reference in this array
-                for (int i = 0; i < arr.size(); i++) {
-                    SSGObject next = childObj.readNextSSGObject(childObj);
-                    if (!(next instanceof SSFF4Reference ref)) continue;
-
-                    String val = ref.getValue();
-                    if (!val.isEmpty() && !val.equals("null") && !val.equals("\"\"")) {
-                        return ref; // found a valid reference
-                    }
-                }
-                // No valid reference found, move to next sibling
-                childObj = getProperty(prop); // try again with next array element
-            }
-
-            return childObj;
-        }
-
-        private SSFGObject getProperty(SSFF4Property prop) throws Exception {
-            SSFGObject obj = (SSFF4Composition) this;
-            
-            if (!(obj instanceof SSFF4Object)) return null;
-            SSFF4Property property = ((SSFF4Object) obj).getProperty(prop);
-
-            if (property == null || property.getValue().isEmpty()) return null;
-            return property;
         }
     }
 
-    // ---------------------------------------------------------------------------
-    // Helper classes for SSFF types
-    // ---------------------------------------------------------------------------
 
-    private static class SSGArray extends SSGObject {
-        final int size;
-        long nextOffset = -1;
+    /**
+     * Checks if the stream contains RIFF/WAVE data and extracts it to a temporary file.
+     *
+     * @param document     The stream to check
+     * @param outputFolder The folder where to write the extracted file
+     * @return The extracted file or null if the stream is no WAVE file
+     * @throws IOException Could not read the stream
+     */
+    private static File extractIfWaveFile (final DocumentEntry document, final File outputFolder) throws IOException
+    {
+        try (DocumentInputStream input = new DocumentInputStream (document))
+        {
+            // RIFF header: 'R','I','F','F' followed by size and 'WAVE'
+            final byte[] header = new byte [12];
+            if (input.available () < 12 || input.read (header) != 12)
+                return null;
 
-        SSGArray(SSFF4DataReader reader) throws Exception {
-            super(reader);
-            this.size = ((SSFGObject) this).getValue().length; // simplified
-        }
+            if (header[0] != 'R' || header[1] != 'I' || header[2] != 'F' || header[3] != 'F')
+                return null;
+            if (header[8] != 'W' || header[9] != 'A' || header[10] != 'V' || header[11] != 'E')
+                return null;
 
-        @Override public SSGObject readNextSSGObject(SSFF4DataReader reader) throws Exception {
-            if (nextOffset >= 0 && nextOffset < reader.getFileSize()) {
-                reader.seekToOffset(nextOffset);
-                return reader.readNextSSGObject(reader);
-            } else {
-                throw new IllegalStateException("End of array at offset " + nextOffset);
+            input.reset ();
+
+            final String fileName = sanitizeFileName (document.getName ()) + ".wav";
+            final File outputFile = new File (outputFolder, fileName);
+
+            try (OutputStream output = Files.newOutputStream (outputFile.toPath ()))
+            {
+                final byte[] buffer = new byte [8192];
+                int read;
+                while ((read = input.read (buffer)) != -1)
+                    output.write (buffer, 0, read);
             }
-        }
 
-        @Override public void skipNextSSGObject(SSFF4DataReader reader) throws Exception {
-            if (nextOffset >= 0 && nextOffset < reader.getFileSize()) {
-                // Skip this element and move to next
-                nextOffset = reader.getOffset() + ((SSFGArray) this).getNextElementSize();
-            }
-        }
-
-        @Override public long getNextElementSize() throws Exception {
-            return reader.readNextSSGObject(reader).getSizeInBytes();
+            return outputFile;
         }
     }
 
+
+    /**
+     * Creates a safe file name from a stream name.
+     *
+     * @param name The stream name
+     * @return The sanitized file name
+     */
+    private static String sanitizeFileName (final String name)
+    {
+        return name.replaceAll ("[\\\\/:*?\"<>|]", "_");
+    }
+
+
+    /**
+     * Reads the duration of a WAVE file in seconds.
+     *
+     * @param waveFile The WAVE file
+     * @return The duration in seconds or 0 if it could not be read
+     */
+    private static double getWaveDuration (final File waveFile)
+    {
+        // Simple RIFF/WAVE parsing: find the 'fmt ' chunk for the sample rate and
+        // the 'data' chunk for the number of data bytes.
+        try (InputStream input = Files.newInputStream (waveFile.toPath ()))
+        {
+            final byte[] riffHeader = new byte [12];
+            if (input.read (riffHeader) != 12)
+                return 0;
+
+            long sampleRate = 0;
+            long blockAlign = 0;
+            long dataLength = 0;
+
+            while (true)
+            {
+                final byte[] chunkHeader = new byte [8];
+                final int read = input.read (chunkHeader);
+                if (read != 8)
+                    break;
+
+                final String chunkId = new String (chunkHeader, 0, 4, "US-ASCII");
+                final long chunkSize = (chunkHeader[4] & 0xFF) | (chunkHeader[5] & 0xFF) << 8 | (chunkHeader[6] & 0xFF) << 16 | (chunkHeader[7] & 0xFF) << 24;
+
+                if ("fmt ".equals (chunkId))
+                {
+                    final byte[] format = new byte [16];
+                    if (input.read (format) != 16)
+                        break;
+                    sampleRate = (format[4] & 0xFF) | (format[5] & 0xFF) << 8 | (format[6] & 0xFF) << 16 | (format[7] & 0xFF) << 24;
+                    blockAlign = (format[12] & 0xFF) | (format[13] & 0xFF) << 8;
+                    if (chunkSize > 16)
+                        input.skip (chunkSize - 16);
+                }
+                else if ("data".equals (chunkId))
+                {
+                    dataLength = chunkSize;
+                    break;
+                }
+                else
+                {
+                    // Skip unknown chunks (chunks are word aligned)
+                    long toSkip = chunkSize + (chunkSize & 1);
+                    while (toSkip > 0)
+                        toSkip -= input.skip (toSkip);
+                }
+            }
+
+            if (sampleRate > 0 && blockAlign > 0 && dataLength > 0)
+                return dataLength / (double) (sampleRate * blockAlign);
+        }
+        catch (final IOException ex)
+        {
+            // Fall through
+        }
+        return 0;
+    }
 }

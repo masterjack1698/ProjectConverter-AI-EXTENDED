@@ -20,6 +20,7 @@ module de.mossgrabers.projectconverter
     requires javafx.graphics;
     requires transitive com.bitwig.dawproject;
     requires jakarta.xml.bind;
+    requires org.apache.poi.poi;
 
 
     exports de.mossgrabers.projectconverter;
@@ -28,6 +29,7 @@ module de.mossgrabers.projectconverter
     exports de.mossgrabers.projectconverter.format.reaper;
     exports de.mossgrabers.projectconverter.format.reaper.model;
     exports de.mossgrabers.projectconverter.format.dawproject;
+    exports de.mossgrabers.projectconverter.format.aaf;
 
 
     opens de.mossgrabers.projectconverter.css;

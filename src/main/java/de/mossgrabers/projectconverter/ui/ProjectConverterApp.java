@@ -18,6 +18,7 @@ import de.mossgrabers.projectconverter.INotifier;
 import de.mossgrabers.projectconverter.core.ConversionTask;
 import de.mossgrabers.projectconverter.core.IDestinationFormat;
 import de.mossgrabers.projectconverter.core.ISourceFormat;
+import de.mossgrabers.projectconverter.format.aaf.AafDetector;
 import de.mossgrabers.projectconverter.format.bento.BentoDetector;
 import de.mossgrabers.projectconverter.format.dawproject.DawProjectCreator;
 import de.mossgrabers.projectconverter.format.dawproject.DawProjectDetector;
@@ -125,7 +126,8 @@ public class ProjectConverterApp extends AbstractFrame implements INotifier
         {
             new DawProjectDetector (this),
             new ReaperDetector (this),
-            new BentoDetector (this)
+            new BentoDetector (this),
+            new AafDetector (this)
         };
 
         this.sourceExtensionFilters = new ExtensionFilter [this.sourceFormats.length + 1];

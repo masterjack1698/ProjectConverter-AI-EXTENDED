@@ -43,9 +43,16 @@ import javafx.stage.FileChooser.ExtensionFilter;
  * written to any destination format (e.g. Reaper .rpp) by the existing destination
  * implementations.
  *
+ * The AAF object model (Mobs, TimelineMobSlots, Sequences, SourceClips) is decoded by
+ * the AAFParser. From it the timeline positioning of every clip is reconstructed:
+ *
+ * - clip.time       = accumulated sequence position / edit rate (seconds)
+ * - clip.duration   = clip length / edit rate (seconds)
+ * - clip.playStart  = trim offset into the source media (seconds)
+ *
  * Current scope: audio tracks and their clips. Video essence is ignored.
  *
- * @author Jürgen Moßgraber
+ * @author J&uuml;rgen Mo&szlig;graber
  */
 public class AafDetector extends AbstractCoreTask implements ISourceFormat
 {
@@ -134,62 +141,166 @@ public class AafDetector extends AbstractCoreTask implements ISourceFormat
 
             final List<Track> tracks = new ArrayList<> ();
 
-            int trackCounter = 0;
             try (final IMediaFiles mediaFiles = dawProject.getMediaFiles ())
             {
-                for (final AAFParser.AudioClip audioClip: aafProject.audioClips)
+                if (aafProject.tracks.isEmpty ())
                 {
-                    trackCounter++;
-
-                    final Track track = new Track ();
-                    track.name = "Audio " + trackCounter + " (" + audioClip.streamName + ")";
-                    track.contentType = new ContentType []
+                    this.convertFallbackTracks (aafProject, tracks, project, mediaFiles);
+                }
+                else
+                {
+                    for (final AAFParser.Track aafTrack: aafProject.tracks)
                     {
-                        ContentType.AUDIO
-                    };
-                    track.channel = new Channel ();
-                    tracks.add (track);
+                        final Track track = new Track ();
+                        track.name = aafTrack.name;
+                        track.contentType = new ContentType []
+                        {
+                            ContentType.AUDIO
+                        };
+                        track.channel = new Channel ();
+                        tracks.add (track);
 
-                    // Create the lanes of the track
-                    final Lanes trackLanes = new Lanes ();
-                    trackLanes.track = track;
-                    project.arrangement.lanes.lanes.add (trackLanes);
+                        // Create the lanes of the track
+                        final Lanes trackLanes = new Lanes ();
+                        trackLanes.track = track;
+                        project.arrangement.lanes.lanes.add (trackLanes);
 
-                    // One clip lane with one clip for the extracted audio
-                    final Clips clips = new Clips ();
-                    trackLanes.lanes.add (clips);
-                    TimeUtils.setTimeUnit (clips, false);
+                        // One clip lane with one clip for each SourceClip of the sequence
+                        final Clips clips = new Clips ();
+                        trackLanes.lanes.add (clips);
+                        TimeUtils.setTimeUnit (clips, false);
 
-                    final Audio audio = new Audio ();
-                    audio.file = new FileReference ();
-                    audio.file.path = "samples/" + audioClip.audioFile.getName ();
-                    audio.algorithm = "raw";
-                    audio.duration = Double.valueOf (audioClip.durationSeconds);
+                        for (final AAFParser.ClipEntry clipEntry: aafTrack.clips)
+                        {
+                            if (clipEntry.audio == null)
+                            {
+                                // The referenced media could not be matched to an extracted
+                                // stream: fall back to the extracted files in order.
+                                clipEntry.audio = this.takeUnusedAudio (aafProject);
+                            }
 
-                    final Clip clip = new Clip ();
-                    clip.name = audioClip.audioFile.getName ();
-                    // TODO: The real start positions are stored in the AAF object model
-                    // (Sequence/SourceClip), which is not decoded yet. All clips are
-                    // therefore placed at position 0 for now.
-                    clip.time = Double.valueOf (0);
-                    clip.duration = Double.valueOf (audioClip.durationSeconds);
-                    clip.playStart = Double.valueOf (0);
-                    clip.content = audio;
-                    clips.clips.add (clip);
+                            if (clipEntry.audio == null)
+                                continue;
 
-                    mediaFiles.add ("samples/" + audioClip.audioFile.getName (), audioClip.audioFile);
+                            final String mediaID = "samples/" + clipEntry.audio.audioFile.getName ();
+                            mediaFiles.add (mediaID, clipEntry.audio.audioFile);
 
-                    this.notifier.log ("IDS_NOTIFY_AAF_EXTRACTED_AUDIO", audioClip.streamName);
+                            final Audio audio = new Audio ();
+                            audio.file = new FileReference ();
+                            audio.file.path = mediaID;
+                            audio.algorithm = "raw";
+                            audio.duration = Double.valueOf (clipEntry.audio.durationSeconds);
+
+                            final Clip clip = new Clip ();
+                            clip.name = clipEntry.audio.audioFile.getName ();
+                            clip.time = Double.valueOf (clipEntry.startSeconds);
+                            clip.duration = Double.valueOf (clipEntry.durationSeconds);
+                            clip.playStart = Double.valueOf (clipEntry.sourceOffsetSeconds);
+                            clip.content = audio;
+                            clips.clips.add (clip);
+
+                            this.notifier.log ("IDS_NOTIFY_AAF_CLIP_POSITION", clip.name, formatSeconds (clipEntry.startSeconds), formatSeconds (clipEntry.durationSeconds));
+                        }
+                    }
                 }
             }
 
-            if (aafProject.audioClips.isEmpty ())
+            if (aafProject.tracks.isEmpty () && aafProject.audioClips.isEmpty ())
                 this.notifier.logError ("IDS_NOTIFY_AAF_NO_AUDIO");
+            else if (!aafProject.tracks.isEmpty ())
+                this.notifier.log ("IDS_NOTIFY_AAF_TIMELINE_DETECTED", Integer.toString (aafProject.tracks.size ()));
 
             project.structure.addAll (tracks);
 
             return dawProject;
         }
+    }
+
+
+    /**
+     * Fallback conversion if no timeline structure could be reconstructed from the AAF
+     * object model: each extracted audio file gets its own track with a clip at position 0.
+     *
+     * @param aafProject  The parsed AAF project
+     * @param tracks      Where to add the tracks
+     * @param project     The dawproject project
+     * @param mediaFiles  The media files to register the audio with
+     * @throws IOException Could not register a media file
+     */
+    private void convertFallbackTracks (final AAFParser.AafProject aafProject, final List<Track> tracks, final Project project, final IMediaFiles mediaFiles) throws IOException
+    {
+        int trackCounter = 0;
+        for (final AAFParser.AudioClip audioClip: aafProject.audioClips)
+        {
+            trackCounter++;
+
+            final Track track = new Track ();
+            track.name = "Audio " + trackCounter + " (" + audioClip.streamName + ")";
+            track.contentType = new ContentType []
+            {
+                ContentType.AUDIO
+            };
+            track.channel = new Channel ();
+            tracks.add (track);
+
+            final Lanes trackLanes = new Lanes ();
+            trackLanes.track = track;
+            project.arrangement.lanes.lanes.add (trackLanes);
+
+            final Clips clips = new Clips ();
+            trackLanes.lanes.add (clips);
+            TimeUtils.setTimeUnit (clips, false);
+
+            final String mediaID = "samples/" + audioClip.audioFile.getName ();
+            mediaFiles.add (mediaID, audioClip.audioFile);
+
+            final Audio audio = new Audio ();
+            audio.file = new FileReference ();
+            audio.file.path = mediaID;
+            audio.algorithm = "raw";
+            audio.duration = Double.valueOf (audioClip.durationSeconds);
+
+            final Clip clip = new Clip ();
+            clip.name = audioClip.audioFile.getName ();
+            clip.time = Double.valueOf (0);
+            clip.duration = Double.valueOf (audioClip.durationSeconds);
+            clip.playStart = Double.valueOf (0);
+            clip.content = audio;
+            clips.clips.add (clip);
+
+            this.notifier.log ("IDS_NOTIFY_AAF_EXTRACTED_AUDIO", audioClip.streamName);
+        }
+    }
+
+
+    /**
+     * Takes the next audio clip from the projects fallback list which has not been used
+     * for a positioned clip so far.
+     *
+     * @param aafProject The parsed AAF project
+     * @return The next unused audio clip or null if there is none
+     */
+    private AAFParser.AudioClip takeUnusedAudio (final AAFParser.AafProject aafProject)
+    {
+        for (final AAFParser.AudioClip clip: aafProject.audioClips)
+            if (!clip.used)
+            {
+                clip.used = true;
+                return clip;
+            }
+        return null;
+    }
+
+
+    /**
+     * Formats seconds into a human readable value.
+     *
+     * @param seconds The seconds
+     * @return The formatted value
+     */
+    private static String formatSeconds (final double seconds)
+    {
+        return String.format (java.util.Locale.US, "%.3f s", Double.valueOf (seconds));
     }
 
 

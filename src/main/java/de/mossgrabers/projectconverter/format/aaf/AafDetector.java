@@ -179,7 +179,7 @@ public class AafDetector extends AbstractCoreTask implements ISourceFormat
                                 clipEntry.audio = this.takeUnusedAudio (aafProject);
                             }
 
-                            if (clipEntry.audio == null)
+                            if (clipEntry.audio == null || clipEntry.audio.audioFile == null)
                                 continue;
 
                             final String mediaID = "samples/" + clipEntry.audio.audioFile.getName ();
@@ -232,6 +232,10 @@ public class AafDetector extends AbstractCoreTask implements ISourceFormat
         int trackCounter = 0;
         for (final AAFParser.AudioClip audioClip: aafProject.audioClips)
         {
+            // Skip references to external files which could not be resolved
+            if (audioClip.audioFile == null)
+                continue;
+
             trackCounter++;
 
             final Track track = new Track ();

@@ -22,6 +22,7 @@ import com.bitwig.dawproject.timeline.Audio;
 import com.bitwig.dawproject.timeline.Clip;
 import com.bitwig.dawproject.timeline.Clips;
 import com.bitwig.dawproject.timeline.Lanes;
+import com.bitwig.dawproject.timeline.TimeUnit;
 
 import de.mossgrabers.projectconverter.INotifier;
 import de.mossgrabers.projectconverter.core.AbstractCoreTask;
@@ -134,6 +135,7 @@ public class AafDetector extends AbstractCoreTask implements ISourceFormat
         {
             final Project project = dawProject.getProject ();
             project.application.name = "AAF (converted with ProjectConverter)";
+            project.application.version = "1.0";
 
             project.arrangement = new Arrangement ();
             project.arrangement.lanes = new Lanes ();
@@ -185,18 +187,7 @@ public class AafDetector extends AbstractCoreTask implements ISourceFormat
                             final String mediaID = "samples/" + clipEntry.audio.audioFile.getName ();
                             mediaFiles.add (mediaID, clipEntry.audio.audioFile);
 
-                            final Audio audio = new Audio ();
-                            audio.file = new FileReference ();
-                            audio.file.path = mediaID;
-                            audio.algorithm = "raw";
-                            audio.duration = Double.valueOf (clipEntry.audio.durationSeconds);
-
-                            final Clip clip = new Clip ();
-                            clip.name = clipEntry.audio.audioFile.getName ();
-                            clip.time = Double.valueOf (clipEntry.startSeconds);
-                            clip.duration = Double.valueOf (clipEntry.durationSeconds);
-                            clip.playStart = Double.valueOf (clipEntry.sourceOffsetSeconds);
-                            clip.content = audio;
+                            final Clip clip = this.createPositionedClip (clipEntry.audio, mediaID, clipEntry.startSeconds, clipEntry.durationSeconds, clipEntry.sourceOffsetSeconds, clipEntry.audio.audioFile.getName ());
                             clips.clips.add (clip);
 
                             this.notifier.log ("IDS_NOTIFY_AAF_CLIP_POSITION", clip.name, formatSeconds (clipEntry.startSeconds), formatSeconds (clipEntry.durationSeconds));
@@ -258,22 +249,56 @@ public class AafDetector extends AbstractCoreTask implements ISourceFormat
             final String mediaID = "samples/" + audioClip.audioFile.getName ();
             mediaFiles.add (mediaID, audioClip.audioFile);
 
-            final Audio audio = new Audio ();
-            audio.file = new FileReference ();
-            audio.file.path = mediaID;
-            audio.algorithm = "raw";
-            audio.duration = Double.valueOf (audioClip.durationSeconds);
-
-            final Clip clip = new Clip ();
-            clip.name = audioClip.audioFile.getName ();
-            clip.time = Double.valueOf (0);
-            clip.duration = Double.valueOf (audioClip.durationSeconds);
-            clip.playStart = Double.valueOf (0);
-            clip.content = audio;
+            final Clip clip = this.createPositionedClip (audioClip, mediaID, Double.valueOf (0), audioClip.durationSeconds, Double.valueOf (0), audioClip.audioFile.getName ());
             clips.clips.add (clip);
 
             this.notifier.log ("IDS_NOTIFY_AAF_EXTRACTED_AUDIO", audioClip.streamName);
         }
+    }
+
+
+    /**
+     * Creates an audio clip in the structure which the DAWs write themselves: an outer
+     * clip carrying the position on the timeline and the section of the media to play
+     * (playStart), containing an inner clip (time 0) with the full audio content.
+     *
+     * @param audioClip    The audio media of the clip
+     * @param mediaID      The ID of the media file
+     * @param startSeconds The position on the timeline in seconds
+     * @param duration     The duration of the section in seconds
+     * @param playStart    The offset into the media in seconds
+     * @param name         The name of the clip
+     * @return The positioned clip
+     */
+    private Clip createPositionedClip (final AAFParser.AudioClip audioClip, final String mediaID, final double startSeconds, final double duration, final double playStart, final String name)
+    {
+        final Audio audio = new Audio ();
+        audio.file = new FileReference ();
+        audio.file.path = mediaID;
+        audio.file.external = Boolean.FALSE;
+        audio.algorithm = "raw";
+        audio.duration = Double.valueOf (audioClip.durationSeconds);
+        audio.sampleRate = audioClip.sampleRate;
+        audio.channels = audioClip.channels;
+
+        // The inner clip carries the full audio content (like the DAWs write it)
+        final Clip innerClip = new Clip ();
+        innerClip.contentTimeUnit = TimeUnit.SECONDS;
+        innerClip.time = Double.valueOf (0);
+        innerClip.duration = Double.valueOf (audioClip.durationSeconds);
+        innerClip.content = audio;
+
+        final Clips innerClips = new Clips ();
+        innerClips.clips.add (innerClip);
+
+        final Clip clip = new Clip ();
+        clip.name = name;
+        clip.time = Double.valueOf (startSeconds);
+        clip.duration = Double.valueOf (duration);
+        clip.playStart = Double.valueOf (playStart);
+        clip.enable = Boolean.TRUE;
+        clip.content = innerClips;
+        return clip;
     }
 
 

@@ -103,6 +103,10 @@ public class AAFParser
         public final String streamName;
         /** Duration of the audio in seconds. */
         public final double durationSeconds;
+        /** The sample rate of the audio in Hz (0 if unknown). */
+        public int          sampleRate;
+        /** The number of audio channels (0 if unknown). */
+        public int          channels;
         /** The MobID of the SourceMob this essence belongs to (hex string). */
         public String       mobID = "";
         /** True if this clip has already been assigned to a positioned clip entry. */
@@ -502,6 +506,9 @@ public class AAFParser
                 String mobIDHex = toHex(mobIDProp.data);
                 clip = new AudioClip(extractedFile, document.getName(), getWaveDuration(extractedFile));
                 clip.mobID = mobIDHex;
+                final long [] waveInfo = readWaveInfo (extractedFile);
+                clip.sampleRate = (int) waveInfo[0];
+                clip.channels = waveInfo[3] > 0 ? (int) waveInfo[3] : 1;
                 project.audioClips.add(clip);
             }
         }
@@ -675,6 +682,9 @@ public class AAFParser
 
         // Create an AudioClip representing the external reference
         AudioClip clip = new AudioClip (externalFile, externalPath, duration);
+        final long [] externalWaveInfo = readWaveInfo (externalFile);
+        clip.sampleRate = (int) externalWaveInfo[0];
+        clip.channels = externalWaveInfo[3] > 0 ? (int) externalWaveInfo[3] : 1;
         // The MobID of the source mob links the external media to the clips referencing it
         final String mobID = getMobID (ownerMob, "MobID");
         clip.mobID = mobID == null ? "" : mobID;
@@ -1062,12 +1072,16 @@ public class AAFParser
     {
         String mobID = sourceMobID;
         AafObj referencedMob = mobByMobID.get(mobID);
+        AafObj currentClip = clip;
 
         int guard = 0;
         while(referencedMob != null && !hasEssenceDescription(referencedMob) && guard++ < 8)
         {
-            // Find the source clip of the referenced mob's first timeline slot
-            final AafObj nextClip = firstSourceClip(referencedMob);
+            // The SourceMobSlotID of the current clip selects the timeline slot of the
+            // referenced mob (multichannel master mobs have one slot per channel). Each
+            // hop uses the SourceMobSlotID of the clip found in the previous hop.
+            final int slotID = getU32(currentClip, "SourceMobSlotID", 0);
+            final AafObj nextClip = firstSourceClip(referencedMob, slotID);
             if (nextClip == null)
                 break;
 
@@ -1078,6 +1092,7 @@ public class AAFParser
             trimInOut[0] += getI64(nextClip, "StartTime", 0);
             mobID = nextMobID;
             referencedMob = mobByMobID.get(mobID);
+            currentClip = nextClip;
         }
 
         return mobID;
@@ -1085,9 +1100,13 @@ public class AAFParser
 
 
     /**
-     * Returns the SourceClip of the first timeline slot of a mob (if any).
+     * Returns the SourceClip of the timeline slot of a mob which matches the given slot
+     * id (if any), otherwise the SourceClip of the first slot.
+     *
+     * @param mob           The mob
+     * @param sourceTrackID The slot id to look for (0 = any)
      */
-    private static AafObj firstSourceClip(final AafObj mob)
+    private static AafObj firstSourceClip(final AafObj mob, final int sourceTrackID)
     {
         final Prop slotsProp = mob.get("Slots");
         if (slotsProp == null || slotsProp.form != FORM_STRONG_VECTOR)
@@ -1096,26 +1115,48 @@ public class AAFParser
         if (slotsDirName == null)
             return null;
 
+        AafObj first = null;
+
         for (final AafObj slot : orderedChildren(mob, slotsDirName))
         {
-            final String segmentName = strongRefName(slot, "Segment");
-            if (segmentName == null)
-                continue;
-            final AafObj segment = slot.childrenByName.get(segmentName);
-            if (segment == null)
+            // Select the slot which matches the source track id of the referencing clip
+            if (sourceTrackID > 0 && getU32(slot, "SlotID", 0) != sourceTrackID)
                 continue;
 
-            if (getMobID(segment, "SourceID") != null)
-                return segment;
-
-            // A sequence: return the first SourceClip found in it
-            final String componentsDirName = strongVectorName(segment, "Components");
-            if (componentsDirName == null)
+            final AafObj clip = firstSourceClipOfSlot(slot);
+            if (clip == null)
                 continue;
-            for (final AafObj component : orderedChildren(segment, componentsDirName))
-                if (getMobID(component, "SourceID") != null)
-                    return component;
+            if (sourceTrackID > 0)
+                return clip;
+            if (first == null)
+                first = clip;
         }
+        return first;
+    }
+
+
+    /**
+     * Returns the first SourceClip of a slot (its segment or the first component of it).
+     */
+    private static AafObj firstSourceClipOfSlot(final AafObj slot)
+    {
+        final String segmentName = strongRefName(slot, "Segment");
+        if (segmentName == null)
+            return null;
+        final AafObj segment = slot.childrenByName.get(segmentName);
+        if (segment == null)
+            return null;
+
+        if (getMobID(segment, "SourceID") != null)
+            return segment;
+
+        // A sequence: return the first SourceClip found in it
+        final String componentsDirName = strongVectorName(segment, "Components");
+        if (componentsDirName == null)
+            return null;
+        for (final AafObj component : orderedChildren(segment, componentsDirName))
+            if (getMobID(component, "SourceID") != null)
+                return component;
         return null;
     }
 
@@ -1508,11 +1549,11 @@ public class AAFParser
 
 
     /**
-     * Reads sample rate, block align and data length of a WAVE file.
+     * Reads sample rate, block align, data length and channel count of a WAVE file.
      */
     private static long[] readWaveInfo(final File waveFile)
     {
-        final long[] result = { 0, 0, 0 };
+        final long[] result = { 0, 0, 0, 0 };
 
         try (InputStream input = Files.newInputStream(waveFile.toPath()))
         {
@@ -1537,6 +1578,7 @@ public class AAFParser
                         break;
                     result [0] = readUInt32LE(format, 4);
                     result [1] = (format [12] & 0xFFL) | (format [13] & 0xFFL) << 8;
+                    result [3] = (format [2] & 0xFFL) | (format [3] & 0xFFL) << 8;
                     if(chunkSize > 16)
                         skipFully(input, chunkSize - 16);
                 }

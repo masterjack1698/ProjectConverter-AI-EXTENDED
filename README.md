@@ -14,6 +14,13 @@ date:   \today
 \pagebreak 
 </div>
 
+!!! FORK DISCLAIMER !!!
+
+This tool is a fork from the original tool made by Jürgen Moßgraber, I'm trying to expand it with features that would help me during my daily activities.
+All the major changes are vibecoded, they should work a produce the desired output but are probably incomplete and need more testings.
+
+Some classes present some misleading authoring infos, everything will be manually fixed as soon as possible.
+
 # Welcome to the ProjectConverter Documentation
 
 This tool converts from Cockos Reaper projects to the open DAWproject format and back.

@@ -24,6 +24,7 @@ import de.mossgrabers.projectconverter.format.dawproject.DawProjectCreator;
 import de.mossgrabers.projectconverter.format.dawproject.DawProjectDetector;
 import de.mossgrabers.projectconverter.format.reaper.ReaperCreator;
 import de.mossgrabers.projectconverter.format.reaper.ReaperDetector;
+import de.mossgrabers.projectconverter.format.ptx.PtxDetector;
 import de.mossgrabers.tools.FileUtils;
 import de.mossgrabers.tools.ui.AbstractFrame;
 import de.mossgrabers.tools.ui.DefaultApplication;
@@ -127,7 +128,8 @@ public class ProjectConverterApp extends AbstractFrame implements INotifier
             new DawProjectDetector (this),
             new ReaperDetector (this),
             new BentoDetector (this),
-            new AafDetector (this)
+            new AafDetector (this),
+            new PtxDetector (this)
         };
 
         this.sourceExtensionFilters = new ExtensionFilter [this.sourceFormats.length + 1];

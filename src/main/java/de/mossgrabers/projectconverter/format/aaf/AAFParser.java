@@ -1,4 +1,5 @@
-// Written by Jürgen Moßgraber - mossgrabers.de
+// Original implementations by Jürgen Moßgraber - mossgrabers.de
+// Gemma 4 12b - Gemini 3.x flash - GLM 5.3 vibe coded following Jürgen Moßgraber work as a guideline
 // (c) 2021-2026
 // Licensed under LGPLv3 - http://www.gnu.org/licenses/lgpl-3.0.txt
 

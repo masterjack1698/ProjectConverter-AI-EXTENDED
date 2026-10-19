@@ -30,6 +30,7 @@ module de.mossgrabers.projectconverter
     exports de.mossgrabers.projectconverter.format.reaper.model;
     exports de.mossgrabers.projectconverter.format.dawproject;
     exports de.mossgrabers.projectconverter.format.aaf;
+    exports de.mossgrabers.projectconverter.format.ableton;
 
 
     opens de.mossgrabers.projectconverter.css;

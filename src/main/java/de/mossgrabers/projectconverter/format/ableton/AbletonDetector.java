@@ -5,16 +5,20 @@
 
 package de.mossgrabers.projectconverter.format.ableton;
 
+import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.zip.GZIPInputStream;
 
 import de.mossgrabers.projectconverter.INotifier;
 import de.mossgrabers.projectconverter.core.AbstractCoreTask;
@@ -62,6 +66,7 @@ import com.bitwig.dawproject.Application;
 import com.bitwig.dawproject.Transport;
 import com.bitwig.dawproject.timeline.Points;
 import com.bitwig.dawproject.timeline.Markers;
+
 
 /**
  * Detector for Ableton Live projects (.als).
@@ -120,60 +125,41 @@ public class AbletonDetector extends AbstractCoreTask implements ISourceFormat
     @Override
     public DawProjectContainer read (final File sourceFile) throws IOException, ParseException
     {
-        System.out.println ("[DEBUG-FLOW] Inizio lettura file .als: " + sourceFile.getAbsolutePath ());
-        final Process process;
-        final String osName = System.getProperty("os.name").toLowerCase();
-        final ProcessBuilder pb;
-        if (osName.contains("win")) {
-            // Windows
-            pb = new ProcessBuilder(
-                "python3", "abletoolz", "-x", sourceFile.getAbsolutePath ()
-            );
-        } else {
-            // macOS & Linux
-            pb = new ProcessBuilder(
-                 "/bin/bash", "-l", "-c", "python3", "abletoolz", "-x", sourceFile.getAbsolutePath ()
-            );
-        }
-        pb.inheritIO();
-        process = pb.start();
+        System.out.println ("[DEBUG-FLOW] Inizio lettura nativa file .als: " + sourceFile.getAbsolutePath ());
 
-        int exitCode;
-        try {
-            exitCode = process.waitFor ();
-        } catch (InterruptedException e) {
-            Thread.currentThread ().interrupt ();
-            throw new IOException ("Process interrupted", e);
-        }
-
-        if (exitCode != 0)
+        final Document doc;
+        try (final InputStream fileIn = new BufferedInputStream (new FileInputStream (sourceFile)))
         {
-            throw new IOException ("abletoolz failed with exit code " + exitCode);
-        }
+            fileIn.mark (4);
+            final int byte1 = fileIn.read ();
+            final int byte2 = fileIn.read ();
+            fileIn.reset ();
 
-        String baseName = getNameWithoutExtension (sourceFile);
-        File xmlFile = new File (sourceFile.getParentFile (), baseName + ".xml");
-
-        if (!xmlFile.exists ())
-        {
-            final File fallbackXml = new File (sourceFile.getParentFile (), sourceFile.getName () + ".xml");
-            if (fallbackXml.exists ())
-                xmlFile = fallbackXml;
+            final InputStream xmlStream;
+            // GZIP Magic Bytes: 0x1F, 0x8B
+            if (byte1 == 0x1f && byte2 == 0x8b)
+            {
+                System.out.println ("[DEBUG-FLOW] Rilevato archivio GZIP valido, decompressione in memoria...");
+                xmlStream = new GZIPInputStream (fileIn);
+            }
             else
-                throw new IOException ("Expected XML file was not created. Checked: " + xmlFile.getAbsolutePath ());
+            {
+                System.out.println ("[DEBUG-FLOW] File non compresso in GZIP, parsing come XML plain text...");
+                xmlStream = fileIn;
+            }
+
+            final DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance ();
+            factory.setFeature ("http://apache.org/xml/features/disallow-doctype-decl", false);
+            final DocumentBuilder builder = factory.newDocumentBuilder ();
+            doc = builder.parse (xmlStream);
+        }
+        catch (final ParserConfigurationException | SAXException e)
+        {
+            throw new IOException ("Errore durante il parsing del contenuto XML di Ableton: " + e.getMessage (), e);
         }
 
-        System.out.println ("[DEBUG-FLOW] File XML individuato: " + xmlFile.getAbsolutePath ());
-
-        final DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance ();
-        final Document builder;
-        try {
-            builder = factory.newDocumentBuilder ().parse (xmlFile);
-        } catch (ParserConfigurationException | SAXException e) {
-            throw new IOException ("Error parsing XML content", e);
-        }
-
-        return parseAbletonXml (builder, sourceFile);
+        System.out.println ("[DEBUG-FLOW] XML Ableton caricato ed elaborato con successo.");
+        return parseAbletonXml (doc, sourceFile);
     }
 
     private String getNameWithoutExtension (final File file)

@@ -121,12 +121,23 @@ public class AbletonDetector extends AbstractCoreTask implements ISourceFormat
     public DawProjectContainer read (final File sourceFile) throws IOException, ParseException
     {
         System.out.println ("[DEBUG-FLOW] Inizio lettura file .als: " + sourceFile.getAbsolutePath ());
-        final ProcessBuilder pb = new ProcessBuilder (
-            "python3", "-m", "abletoolz", "-x", sourceFile.getAbsolutePath ()
-        );
-        pb.inheritIO ();
-        final Process process = pb.start ();
-        
+        final Process process;
+        final String osName = System.getProperty("os.name").toLowerCase();
+        final ProcessBuilder pb;
+        if (osName.contains("win")) {
+            // Windows
+            pb = new ProcessBuilder(
+                "python3", "abletoolz", "-x", sourceFile.getAbsolutePath ()
+            );
+        } else {
+            // macOS & Linux
+            pb = new ProcessBuilder(
+                 "/bin/bash", "-l", "-c", "python3", "abletoolz", "-x", sourceFile.getAbsolutePath ()
+            );
+        }
+        pb.inheritIO();
+        process = pb.start();
+
         int exitCode;
         try {
             exitCode = process.waitFor ();

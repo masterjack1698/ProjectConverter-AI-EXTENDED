@@ -46,11 +46,7 @@
 			<artifactId>dawproject</artifactId>
 			<version>1-SNAPSHOT</version>
 		</dependency>
-		<dependency>
-			<groupId>com.github.trilarion</groupId>
-			<artifactId>java-vorbis-support</artifactId>
-			<version>1.2.1</version>
-		</dependency>
+
 		<!-- Audio file support -->
 		<!-- MP3 -->
 		<dependency>
@@ -77,8 +73,6 @@
     		<version>5.2.5</version>
 		</dependency>
 	</dependencies>
-
-
 
 
 	<build>
